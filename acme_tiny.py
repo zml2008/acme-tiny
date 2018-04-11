@@ -13,8 +13,19 @@ LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.StreamHandler())
 LOGGER.setLevel(logging.INFO)
 
-def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None):
+def acme_write_to_dir(acme_dir):
+    def create_func(token, keyauthorization):
+        with open(os.path.join(acme_dir, token), "w") as wellknown_file:
+            wellknown_file.write(keyauthorization)
+
+    def delete_func(token):
+        os.remove(os.path.join(acme_dir, token))
+
+    return create_func, delete_func
+
+def get_crt(account_key, csr, acme_funcs, log=LOGGER, CA=DEFAULT_CA, disable_check=False, directory_url=DEFAULT_DIRECTORY_URL, contact=None):
     directory, acct_headers, alg, jwk = None, None, None, None # global variables
+    acme_create_func, acme_delete_func = acme_funcs
 
     # helper functions - base64 encode for jose spec
     def _b64(b):
@@ -130,17 +141,15 @@ def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA, disable_check
         challenge = [c for c in authorization['challenges'] if c['type'] == "http-01"][0]
         token = re.sub(r"[^A-Za-z0-9_\-]", "_", challenge['token'])
         keyauthorization = "{0}.{1}".format(token, thumbprint)
-        wellknown_path = os.path.join(acme_dir, token)
-        with open(wellknown_path, "w") as wellknown_file:
-            wellknown_file.write(keyauthorization)
+        acme_create_func(token, keyauthorization)
 
         # check that the file is in place
         try:
             wellknown_url = "http://{0}/.well-known/acme-challenge/{1}".format(domain, token)
             assert(disable_check or _do_request(wellknown_url)[0] == keyauthorization)
         except (AssertionError, ValueError) as e:
-            os.remove(wellknown_path)
-            raise ValueError("Wrote file to {0}, but couldn't download {1}: {2}".format(wellknown_path, wellknown_url, e))
+            acme_delete_func(token)
+            raise ValueError("Wrote file, but couldn't download {0}: {1}".format(wellknown_url, e))
 
         # say the challenge is done
         _send_signed_request(challenge['url'], {}, "Error submitting challenges: {0}".format(domain))
@@ -190,7 +199,7 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     LOGGER.setLevel(args.quiet or LOGGER.level)
-    signed_crt = get_crt(args.account_key, args.csr, args.acme_dir, log=LOGGER, CA=args.ca, disable_check=args.disable_check, directory_url=args.directory_url, contact=args.contact)
+    signed_crt = get_crt(args.account_key, args.csr, acme_write_to_dir(args.acme_dir), log=LOGGER, CA=args.ca, disable_check=args.disable_check, directory_url=args.directory_url, contact=args.contact)
     sys.stdout.write(signed_crt)
 
 if __name__ == "__main__": # pragma: no cover
